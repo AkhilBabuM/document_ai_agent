@@ -7,6 +7,14 @@ import os
 import requests
 from langchain.agents import AgentType, initialize_agent
 from langchain.tools import Tool
+from langchain_openai import ChatOpenAI
+
+
+llm = ChatOpenAI(
+    base_url="http://127.0.0.1:1234/v1",
+    model_name="deepseek-r1-distill-qwen-7b",
+    openai_api_key="sk-fake-key",  # Fake key to bypass API key check
+)
 
 # LM Studio API Endpoint
 LMSTUDIO_API_URL = "http://localhost:1234/v1/completions"
@@ -79,6 +87,7 @@ def process_document(image_path: str) -> Union[Dict, str]:
         return f"Unrecognized document type: {document_type}"
     
     extracted_data = extract_relevant_data(extracted_text, document_type)
+    print(f"The extracted data is: {extracted_data}")
     
     try:
         validated_data = document_models[document_type](**extracted_data)
@@ -94,7 +103,7 @@ def agentic_system():
         Tool(name="Extract Data", func=extract_relevant_data, description="Extract structured data from a document."),
         Tool(name="Validate Data", func=process_document, description="Validate and structure document data.")
     ]
-    agent = initialize_agent(tools, None, agent=AgentType.ZERO_SHOT_REACT_DESCRIPTION, verbose=True)
+    agent = initialize_agent(tools, llm=llm, agent=AgentType.ZERO_SHOT_REACT_DESCRIPTION, verbose=True)
     return agent
 
 # Batch Processing for Multiple Images
@@ -102,13 +111,13 @@ def process_multiple_documents(image_paths: List[str]) -> List[Dict]:
     agent = agentic_system()
     results = []
     for image_path in image_paths:
-        result = agent.run(image_path)
+        result = agent.invoke(image_path)
         results.append(result)
     return results
 
 # Example Usage
 if __name__ == "__main__":
-    image_files = ["passport1.jpg", "license1.jpg"]
+    image_files = ["ai_pan2.jpeg"]
     results = process_multiple_documents(image_files)
     for res in results:
         print(res)
