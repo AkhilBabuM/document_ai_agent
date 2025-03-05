@@ -1,4 +1,3 @@
-import cv2
 import re
 import pytesseract
 from pydantic import BaseModel, ValidationError, Field
@@ -7,17 +6,19 @@ import json
 from datetime import date
 import asyncio
 from langgraph.graph import StateGraph
-from langchain_openai import ChatOpenAI
+
+# from langchain_openai import ChatOpenAI
+from PIL import Image
 
 from openai import OpenAI
 
 
-# Initialize LLM
-llm = ChatOpenAI(
-    base_url="http://127.0.0.1:1234/v1",
-    model_name="qwen2.5-7b-instruct-1m",
-    openai_api_key="sk-fake-key",
-)
+# # Initialize LLM
+# llm = ChatOpenAI(
+#     base_url="http://127.0.0.1:1234/v1",
+#     model_name="qwen2.5-7b-instruct-1m",
+#     openai_api_key="sk-fake-key",
+# )
 
 # LM Studio API Endpoint
 LMSTUDIO_API_URL = "http://localhost:1234/v1/completions"
@@ -30,8 +31,9 @@ class Passport(BaseModel):
     passport_number: str
     full_name: str
     nationality: str
-    date_of_birth: str
-    expiry_date: str
+    date_of_birth: date
+    expiry_date: date
+
 
 class PAN(BaseModel):
     permanent_account_number: str
@@ -44,12 +46,13 @@ class DrivingLicense(BaseModel):
     license_number: str
     full_name: str
     issue_date: date
-    expiry_date: str
+    expiry_date: date
     category: str
-    address: str = Field(..., description="Tha address, along with pincode. All lowercase")
+    address: str = Field(..., description="The address, along with pincode")
     bloodgroup: str
     date_of_issue: date
     # pin_code: int
+
 
 class Aadhaar(BaseModel):
     aadhaar_number: str
@@ -63,7 +66,7 @@ document_models = {
     "passport": Passport,
     "driving_license": DrivingLicense,
     "pan": PAN,
-    "aadhaar": Aadhaar
+    "aadhaar": Aadhaar,
 }
 
 
@@ -77,16 +80,23 @@ class DocumentProcessingState(BaseModel):
     error: Union[str, None] = None
 
 
-# OCR Step
-async def extract_text_from_image(state: DocumentProcessingState) -> DocumentProcessingState:
-    """Extract text from an image using OCR."""
+async def extract_text_from_image(
+    state: DocumentProcessingState,
+) -> DocumentProcessingState:
+    """Extract text from an image using OCR with preprocessing."""
     try:
-        image = cv2.imread(state.image_path)
-        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-        state.extracted_text = pytesseract.image_to_string(gray).strip()
+        # Load the image
+        image = Image.open(state.image_path)
+
+        # Extract text using OCR
+        state.extracted_text = pytesseract.image_to_string(image, lang="eng")
+        if not state.extracted_text:
+            state.error = "OCR detected no text."
     except Exception as e:
         state.error = f"OCR failed: {str(e)}"
+
     return state
+
 
 async def query_lmstudio(prompt: str) -> str:
     """Query LM Studio using OpenAI-style API."""
@@ -106,26 +116,26 @@ async def query_lmstudio(prompt: str) -> str:
 
 
 # Identify Document Type Step (Now with Context & One-Word Response)
-async def identify_document_type(state: DocumentProcessingState) -> DocumentProcessingState:
+async def identify_document_type(
+    state: DocumentProcessingState,
+) -> DocumentProcessingState:
     """Identify the document type using LLM, enforcing structured response."""
     if state.error:
         return state  # Skip if there was an error in OCR
 
-    # Pass Pydantic Model Examples
-    pydantic_examples = {
-        "passport": Passport.model_json_schema(),
-        "driving_license": DrivingLicense.model_json_schema(),
-        "pan": PAN.model_json_schema(),
-        "aadhaar": Aadhaar.model_json_schema()
+    # Pydantic Model Scehmas for available documents
+    document_model_schemas = {
+        model_name: model.model_json_schema()
+        for model_name, model in document_models.items()
     }
 
     prompt = f"""
     You are an AI that classifies documents based on their extracted text.
-    The possible document types are: "passport", "driving_license", or "other".
+    The possible document types are provided below.
     
     Here are the available document models:
     
-    {json.dumps(pydantic_examples, indent=4)}
+    {json.dumps(document_model_schemas, indent=4)}
 
     Given this extracted text:
     
@@ -137,19 +147,19 @@ async def identify_document_type(state: DocumentProcessingState) -> DocumentProc
     Do not return an explanation, just return a single word.
     No explanation, just single word of model name.
     """
-    # prompt= "say driving_license"
     response = await query_lmstudio(prompt)
     state.document_type = response
 
     return state
 
+
 def clean_llm_response(response: str) -> str:
     """
     Extracts JSON content from LLM response.
-    
+
     - Removes any <think>...</think> sections.
     - Extracts JSON content from Markdown code blocks (```json ... ```).
-    
+
     :param response: The raw LLM response as a string.
     :return: The cleaned JSON string.
     """
@@ -167,9 +177,10 @@ def clean_llm_response(response: str) -> str:
     return response.strip()  # Return the cleaned text
 
 
-
 # Extract Data Step
-async def extract_relevant_data(state: DocumentProcessingState) -> DocumentProcessingState:
+async def extract_relevant_data(
+    state: DocumentProcessingState,
+) -> DocumentProcessingState:
     """Extract structured data from the document using LLM."""
     if state.error:
         return state  # Skip processing if an error occurred
@@ -179,7 +190,7 @@ async def extract_relevant_data(state: DocumentProcessingState) -> DocumentProce
 
     "{state.extracted_text}"
 
-    Ensure that the output follows this Pydantic model fields.
+    Ensure that the output you provide can be validated, and adheres to this Pydantic model schema.
 
     {json.dumps(document_models[state.document_type].model_json_schema(), indent=4)}
 
@@ -187,7 +198,7 @@ async def extract_relevant_data(state: DocumentProcessingState) -> DocumentProce
     """
 
     response = await query_lmstudio(prompt)
-    cleaned_response = clean_llm_response(response) # Remove <think> sections
+    cleaned_response = clean_llm_response(response)  # Remove <think> sections
     try:
         raw_data = json.loads(cleaned_response)
 
@@ -203,7 +214,9 @@ async def extract_relevant_data(state: DocumentProcessingState) -> DocumentProce
 
 
 # Validate Data Step
-async def validate_document_data(state: DocumentProcessingState) -> DocumentProcessingState:
+async def validate_document_data(
+    state: DocumentProcessingState,
+) -> DocumentProcessingState:
     """Validate and structure extracted data using Pydantic models."""
     if state.error:
         return state  # Skip processing if an error occurred
@@ -217,7 +230,7 @@ async def validate_document_data(state: DocumentProcessingState) -> DocumentProc
         state.validated_data = validated_data.model_dump()
     except ValidationError as e:
         state.error = f"Validation error: {e}"
-    
+
     return state
 
 
