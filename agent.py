@@ -1,9 +1,9 @@
 import re
 import pytesseract
-from pydantic import BaseModel, ValidationError, Field
-from typing import List, Dict, Union
+from pydantic import BaseModel, ValidationError, Field, field_validator
+from typing import List, Dict, Union, Any
 import json
-from datetime import date
+from datetime import date, datetime
 import asyncio
 from langgraph.graph import StateGraph
 
@@ -12,14 +12,6 @@ from PIL import Image
 
 from openai import OpenAI
 
-
-# # Initialize LLM
-# llm = ChatOpenAI(
-#     base_url="http://127.0.0.1:1234/v1",
-#     model_name="qwen2.5-7b-instruct-1m",
-#     openai_api_key="sk-fake-key",
-# )
-
 # LM Studio API Endpoint
 LMSTUDIO_API_URL = "http://localhost:1234/v1/completions"
 
@@ -27,7 +19,68 @@ client = OpenAI(base_url="http://127.0.0.1:1234/v1", api_key="lm-studio")
 
 
 # Pydantic Models for Documents
-class Passport(BaseModel):
+date_formats = (
+    "%Y-%m-%d",  # 2024-06-25 (ISO 8601 Standard)
+    "%d/%m/%Y",  # 25/06/2024 (Common in India, UK)
+    "%m/%d/%Y",  # 06/25/2024 (US Format)
+    "%d-%m-%Y",  # 25-06-2024 (Common in India, UK)
+    "%Y/%m/%d",  # 2024/06/25 (Rare but possible)
+    "%m-%d-%Y",  # 06-25-2024 (US Format)
+    "%d %b %Y",  # 25 Jun 2024 (Short Month Name)
+    "%d %B %Y",  # 25 June 2024 (Full Month Name)
+    "%b %d, %Y",  # Jun 25, 2024 (US, Passport Style)
+    "%B %d, %Y",  # June 25, 2024 (Long-form US, UK)
+    "%d.%m.%Y",  # 25.06.2024 (German, European style)
+    "%m.%d.%Y",  # 06.25.2024 (Alternative US style)
+    "%Y.%m.%d",  # 2024.06.25 (Database formats)
+    "%d%m%Y",  # 25062024 (No separator, found in OCR errors)
+    "%Y%m%d",  # 20240625 (Machine-readable)
+    "%d-%b-%Y",  # 25-Jun-2024 (Found in some Indian credentials)
+    "%d-%B-%Y",  # 25-June-2024 (Long form, uncommon)
+    "%Y %b %d",  # 2024 Jun 25 (Seen in some passport formats)
+    "%Y %B %d",  # 2024 June 25
+    "%b-%d-%Y",  # Jun-25-2024
+    "%B-%d-%Y",  # June-25-2024
+    "%b %d %Y",  # Jun 25 2024
+    "%B %d %Y",  # June 25 2024
+    "%d/%b/%Y",  # 25/Jun/2024 (Common in travel documents)
+    "%d/%B/%Y",  # 25/June/2024
+)
+
+
+class DateConversionMixin(BaseModel):
+    """Mixin that attempts to convert values to dates, but passes them through if conversion fails."""
+
+    @field_validator("*", mode="before", check_fields=False)
+    @classmethod
+    def try_convert_to_date(cls, value: Any) -> Any:
+        """Attempt to convert the value to a date. If unsuccessful, return the original value."""
+
+        # If already a date, return as is
+        if isinstance(value, date):
+            return value
+
+        # Try parsing valid date strings
+        if isinstance(value, str):
+            for fmt in date_formats:
+                try:
+                    return str(datetime.strptime(value, fmt).date())  # Convert to date
+                except ValueError:
+                    continue  # Try next format
+            return value  # If no formats match, return the original string
+
+        # Handle integer timestamps (convert to date)
+        if isinstance(value, int):
+            try:
+                return str(datetime.fromtimestamp(value).date())
+            except ValueError:
+                return value  # Return as is if not a valid timestamp
+
+        return value  # Return original value if it can't be converted
+
+
+# Pydantic Models for Documents
+class Passport(DateConversionMixin):
     passport_number: str
     full_name: str
     nationality: str
@@ -35,26 +88,28 @@ class Passport(BaseModel):
     expiry_date: date
 
 
-class PAN(BaseModel):
+class PAN(DateConversionMixin):
     permanent_account_number: str
     name: str
     fathers_name: str
     date_of_birth: date
 
 
-class DrivingLicense(BaseModel):
-    license_number: str
-    full_name: str
-    issue_date: date
-    expiry_date: date
-    category: str
-    address: str = Field(..., description="The address, along with pincode")
-    bloodgroup: str
-    date_of_issue: date
-    # pin_code: int
+class DrivingLicense(DateConversionMixin):
+    license_number: Union[str, None] = None
+    full_name: Union[str, None] = None
+    issue_date: Union[date, None] = None
+    expiry_date: Union[date, None] = None
+    category: Union[List[str], None] = Field(
+        None, description="can have multiple classes"
+    )
+    address: Union[str, None] = None
+    bloodgroup: Union[str, None] = Field(None, description="must be valid blood type")
+    son_of: Union[str, None] = Field(None, description="given as s/o in credentials")
+    date_of_issue: Union[date, None] = None
 
 
-class Aadhaar(BaseModel):
+class Aadhaar(DateConversionMixin):
     aadhaar_number: str
     full_name: str
     dob: date
@@ -89,7 +144,9 @@ async def extract_text_from_image(
         image = Image.open(state.image_path)
 
         # Extract text using OCR
-        state.extracted_text = pytesseract.image_to_string(image, lang="eng")
+        state.extracted_text = pytesseract.image_to_string(
+            image, lang="eng", config="--psm 11"
+        )
         if not state.extracted_text:
             state.error = "OCR detected no text."
     except Exception as e:
@@ -194,6 +251,7 @@ async def extract_relevant_data(
 
     {json.dumps(document_models[state.document_type].model_json_schema(), indent=4)}
 
+    Make sure dates are in format mm-yyyy-dd
     Return the extracted data strictly as a JSON object, such that passing it directly to the model will validate it.
     """
 
@@ -269,7 +327,7 @@ async def process_multiple_documents(image_paths: List[str]) -> List[Dict]:
 
 
 if __name__ == "__main__":
-    image_files = ["documents/aadhaar_1.jpeg"]
+    image_files = ["documents/dl.jpeg"]
 
     results = asyncio.run(process_multiple_documents(image_files))
 
