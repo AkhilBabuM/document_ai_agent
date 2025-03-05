@@ -153,8 +153,8 @@ async def extract_text_from_image(
     return state
 
 
-async def query_lmstudio(prompt: str) -> str:
-    """Query LM Studio using OpenAI-style API."""
+async def query_llm(prompt: str) -> str:
+    """Query LLM"""
     try:
         response = client.chat.completions.create(
             model="qwen2.5-7b-instruct-1m",
@@ -202,7 +202,7 @@ async def identify_document_type(
     Do not return an explanation, just return a single word.
     No explanation, just single word of model name.
     """
-    response = await query_lmstudio(prompt)
+    response = await query_llm(prompt)
     state.document_type = response
 
     return state
@@ -253,7 +253,7 @@ async def extract_relevant_data(
     Return the extracted data strictly as a JSON object, such that passing it directly to the model will validate it.
     """
 
-    response = await query_lmstudio(prompt)
+    response = await query_llm(prompt)
     cleaned_response = clean_llm_response(response)  # Remove <think> sections
     try:
         raw_data = json.loads(cleaned_response)
