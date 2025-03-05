@@ -7,13 +7,15 @@ from datetime import date, datetime
 import asyncio
 from langgraph.graph import StateGraph
 from PIL import Image
+import httpx
 
 from openai import OpenAI
 
-# LM Studio API Endpoint
-LMSTUDIO_API_URL = "http://localhost:1234/v1/completions"
+# Ollama API Endpoint
+OLLAMA_API_URL = "http://localhost:11434/v1"
 
-client = OpenAI(base_url="http://127.0.0.1:1234/v1", api_key="lm-studio")
+client = OpenAI(base_url=OLLAMA_API_URL, api_key="test")
+
 
 
 # Pydantic Models for Documents
@@ -152,22 +154,24 @@ async def extract_text_from_image(
 
     return state
 
-
-async def query_llm(prompt: str) -> str:
-    """Query LLM"""
+async def query_ollama(prompt: str) -> str:
+    """Query Ollama's locally running model."""
     try:
-        response = client.chat.completions.create(
-            model="qwen2.5-7b-instruct-1m",
-            messages=[
-                {"role": "system", "content": "You are a helpful assistant."},
-                {"role": "user", "content": prompt},
-            ],
-            temperature=0.8,
-            max_tokens=1028,
-        )
-        return response.choices[0].message.content.strip()
+        async with httpx.AsyncClient() as client:
+            response = await client.post(
+                "http://localhost:11434/api/generate",  # Ollama's API
+                json={"model": "qwen2.5", "prompt": prompt, "stream": False},
+                timeout=60,
+            )
+            response_data = response.json()
+
+            if "response" in response_data:
+                return response_data["response"].strip()
+            else:
+                return f"Error: Unexpected response format {response_data}"
     except Exception as e:
         return f"Error in LLM query: {str(e)}"
+
 
 
 # Identify Document Type Step (Now with Context & One-Word Response)
@@ -202,7 +206,7 @@ async def identify_document_type(
     Do not return an explanation, just return a single word.
     No explanation, just single word of model name.
     """
-    response = await query_llm(prompt)
+    response = await query_ollama(prompt)
     state.document_type = response
 
     return state
@@ -253,7 +257,7 @@ async def extract_relevant_data(
     Return the extracted data strictly as a JSON object, such that passing it directly to the model will validate it.
     """
 
-    response = await query_llm(prompt)
+    response = await query_ollama(prompt)
     cleaned_response = clean_llm_response(response)  # Remove <think> sections
     try:
         raw_data = json.loads(cleaned_response)
