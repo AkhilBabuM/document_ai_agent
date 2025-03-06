@@ -7,13 +7,14 @@ from datetime import date, datetime
 import asyncio
 from langgraph.graph import StateGraph
 from PIL import Image
+import httpx
 
 from openai import OpenAI
 
-# LM Studio API Endpoint
-LMSTUDIO_API_URL = "http://localhost:1234/v1/completions"
+# Ollama API Endpoint
+OLLAMA_API_URL = "http://localhost:11434/v1"
 
-client = OpenAI(base_url="http://127.0.0.1:1234/v1", api_key="lm-studio")
+client = OpenAI(base_url=OLLAMA_API_URL, api_key="test")
 
 
 # Pydantic Models for Documents
@@ -43,6 +44,7 @@ date_formats = (
     "%B %d %Y",  # June 25 2024
     "%d/%b/%Y",  # 25/Jun/2024 (Common in travel documents)
     "%d/%B/%Y",  # 25/June/2024
+    "%m-%Y-%d",  # 06-2024-25
 )
 
 
@@ -125,7 +127,7 @@ document_models = {
 
 # State Model for LangGraph
 class DocumentProcessingState(BaseModel):
-    image_path: str
+    image_path: Union[List[str], None] = None
     extracted_text: Union[str, None] = None
     document_type: Union[str, None] = None
     extracted_data: Union[Dict, None] = None
@@ -133,41 +135,66 @@ class DocumentProcessingState(BaseModel):
     error: Union[str, None] = None
 
 
+class OCRResponse(BaseModel):
+    validated_data: Union[Dict, None] = None
+
+
 async def extract_text_from_image(
     state: DocumentProcessingState,
 ) -> DocumentProcessingState:
     """Extract text from an image using OCR with preprocessing."""
+    state.extracted_text = ""
     try:
-        # Load the image
-        image = Image.open(state.image_path)
+        for image_path in state.image_path:
+            # Load the image
+            image = Image.open(image_path)
 
-        # Extract text using OCR
-        state.extracted_text = pytesseract.image_to_string(
-            image, lang="eng", config="--psm 11"
-        )
-        if not state.extracted_text:
-            state.error = "OCR detected no text."
+            # Extract text using OCR
+            state.extracted_text += pytesseract.image_to_string(
+                image, lang="eng", config="--psm 11"
+            )
+            if not state.extracted_text:
+                state.error = "OCR detected no text."
     except Exception as e:
         state.error = f"OCR failed: {str(e)}"
 
     return state
 
 
-async def query_lmstudio(prompt: str) -> str:
-    """Query LM Studio using OpenAI-style API."""
+async def query_ollama(prompt: str) -> str:
+    """Query Ollama's locally running model."""
     try:
-        response = client.chat.completions.create(
-            model="qwen2.5-7b-instruct-1m",
-            messages=[
-                {"role": "system", "content": "You are a helpful assistant."},
-                {"role": "user", "content": prompt},
-            ],
-            temperature=0.8,
-            max_tokens=1028,
-        )
-        return response.choices[0].message.content.strip()
+        async with httpx.AsyncClient() as client:
+            response = await client.post(
+                "http://localhost:11434/api/generate",  # Ollama's API
+                json={"model": "qwen2.5", "prompt": prompt, "stream": False},
+                timeout=60,
+            )
+            response_data = response.json()
+
+            if "response" in response_data:
+                return response_data["response"].strip()
+            else:
+                return f"Error: Unexpected response format {response_data}"
     except Exception as e:
         return f"Error in LLM query: {str(e)}"
+
+
+def merge_dicts(dict_list: List[Dict]) -> Dict:
+    """Merge a list of dictionaries into a single dictionary, giving precedence to the first occurrence of each key."""
+    merged_dict = {}
+    for d in dict_list:
+        for key, value in d.items():
+            if key not in merged_dict:
+                merged_dict[key] = value
+    return merged_dict
+
+
+def convert_pydantic_to_json(obj):
+    """Converts Pydantic models to JSON serializable format."""
+    if isinstance(obj, BaseModel):
+        return obj.model_dump_json(indent=2)
+    return json.dumps(obj, default=str, indent=2)
 
 
 # Identify Document Type Step (Now with Context & One-Word Response)
@@ -197,12 +224,12 @@ async def identify_document_type(
     "{state.extracted_text}"
     
     Match it with one of the available models and return only one word, which is the model name.
-    If an exact match if not found, return the closest match.
+    If an exact match is not found, return the closest match.
 
     Do not return an explanation, just return a single word.
     No explanation, just single word of model name.
     """
-    response = await query_lmstudio(prompt)
+    response = await query_ollama(prompt)
     state.document_type = response
 
     return state
@@ -246,17 +273,21 @@ async def extract_relevant_data(
     "{state.extracted_text}"
 
     Ensure that the output you provide can be validated, and adheres to this Pydantic model schema.
+    Make sure dates are in proper format.
 
     {json.dumps(document_models[state.document_type].model_json_schema(), indent=4)}
 
-    Make sure dates are in format mm-yyyy-dd
     Return the extracted data strictly as a JSON object, such that passing it directly to the model will validate it.
     """
 
-    response = await query_lmstudio(prompt)
+    response = await query_ollama(prompt)
     cleaned_response = clean_llm_response(response)  # Remove <think> sections
     try:
         raw_data = json.loads(cleaned_response)
+
+        # If multiple documents are detected, consider the first one.
+        if isinstance(raw_data, list):
+            raw_data = raw_data[0]
 
         # Extract only the "properties" field if it exists
         if "properties" in raw_data:
@@ -311,29 +342,43 @@ def build_langraph_pipeline():
 
 
 # Asynchronous Document Processing
-async def process_document(image_path: str) -> Dict:
+async def process_document(image_path: List[str]) -> Dict:
     """Runs the LangGraph pipeline asynchronously for a single document."""
     pipeline = build_langraph_pipeline()
     state = DocumentProcessingState(image_path=image_path)
     return await pipeline.ainvoke(state)
 
+from fastapi import FastAPI, File, UploadFile
+from tempfile import NamedTemporaryFile
+import os
+import uvicorn
 
-async def process_multiple_documents(image_paths: List[str]) -> List[Dict]:
-    """Runs the LangGraph pipeline for multiple documents concurrently."""
-    tasks = [process_document(image) for image in image_paths]
-    return await asyncio.gather(*tasks)
+app = FastAPI()
+
+
+@app.post("/ocr_document")
+async def ocr_document(files: List[UploadFile] = File(...)) -> OCRResponse:
+    image_paths = []
+    try:
+        for file in files:
+            contents = await file.read()
+            file_extension = os.path.splitext(file.filename)[1]
+            with NamedTemporaryFile(delete=False, suffix=file_extension) as tmp:
+                tmp.write(contents)
+                image_paths.append(tmp.name)
+
+        result = await process_document(image_path=image_paths)
+        result = DocumentProcessingState.model_validate(result)
+    finally:
+        for path in image_paths:
+            try:
+                os.remove(path)
+            except OSError as e:
+                print(f"Error deleting temporary file {path}: {e}")
+
+    print(convert_pydantic_to_json(result))
+    return OCRResponse(validated_data=result.validated_data)
 
 
 if __name__ == "__main__":
-    image_files = ["documents/dl.jpeg"]
-
-    results = asyncio.run(process_multiple_documents(image_files))
-
-    def convert_pydantic_to_json(obj):
-        """Converts Pydantic models to JSON serializable format."""
-        if isinstance(obj, BaseModel):
-            return obj.model_dump_json(indent=2)
-        return json.dumps(obj, default=str, indent=2)
-
-    for res in results:
-        print(convert_pydantic_to_json(res))
+    uvicorn.run("agent_api:app", host="0.0.0.0", port=8008, reload=True)
