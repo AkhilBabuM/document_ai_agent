@@ -104,13 +104,13 @@ class DrivingLicense(DateConversionMixin):
         None, description="can have multiple classes"
     )
     address: Union[str, None] = None
-    bloodgroup: Union[str, None] = Field(None, description="must be valid blood type")
+    bloodgroup: Union[str, None] = Field(None, description="must be valid blood type. Could be B.G")
     son_of: Union[str, None] = Field(None, description="given as s/o in credentials")
     date_of_issue: Union[date, None] = None
 
 
 class Aadhaar(DateConversionMixin):
-    aadhaar_number: str
+    aadhaar_number: str = Field(..., description="12 digits of number")
     full_name: str
     dob: date
     gender: str
@@ -151,7 +151,12 @@ async def extract_text_from_image(
 
             # Extract text using OCR
             state.extracted_text += pytesseract.image_to_string(
-                image, lang="eng", config="--psm 11"
+                image, lang="eng", 
+                config="--psm 1"
+            )
+            state.extracted_text += pytesseract.image_to_string(
+                image, lang="eng", 
+                config="--psm 12"
             )
             if not state.extracted_text:
                 state.error = "OCR detected no text."
@@ -233,7 +238,6 @@ async def identify_document_type(
     state.document_type = response
 
     return state
-
 
 def clean_llm_response(response: str) -> str:
     """
