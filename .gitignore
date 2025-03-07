@@ -1,2 +1,6 @@
 .*env
 old
+example-documents
+.DS_Store
+*.pyc
+__pycache__
