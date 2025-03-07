@@ -1,0 +1,8 @@
+fastapi==0.115.11
+uvicorn==0.34.0
+httpx==0.28.1
+pillow==11.1.0
+pytesseract==0.3.13
+langgraph==0.3.5
+python-multipart==0.0.20
+pydantic==2.10.6
