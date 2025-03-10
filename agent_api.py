@@ -14,6 +14,10 @@ app = FastAPI()
 
 @app.post("/ocr_document")
 async def ocr_document(files: List[UploadFile] = File(...)) -> OCRResponse:
+    """
+    Given an image or images for a single credential, 
+    detects the document type and if available, validates it against the model and returns the validated ouput.
+    """
     image_paths = []
     try:
         for file in files:

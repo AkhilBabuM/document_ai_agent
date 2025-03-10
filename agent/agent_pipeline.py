@@ -11,7 +11,6 @@ from langgraph.graph import StateGraph
 from .llm_invoke import query_llm
 from .utils import clean_llm_response, remove_newline_characters
 
-
 async def extract_text_from_image(
     state: DocumentProcessingState,
 ) -> DocumentProcessingState:
@@ -39,7 +38,6 @@ async def extract_text_from_image(
         state.error = f"OCR failed: {str(e)}"
 
     return state
-
 
 # Identify Document Type Step (Now with Context & One-Word Response)
 async def identify_document_type(
@@ -71,16 +69,15 @@ async def identify_document_type(
     If an exact match is not found, return the closest match.
 
     Do not return an explanation, just return a single word.
-    No explanation, just single word of model name.
+    No explanation, just single word of EXACT model name, among {list(document_model_schemas.keys())}
     """
     response = await query_llm(prompt)
-    state.document_type = response
+    state.document_type = response.lower()
 
     if state.document_type not in document_models.keys():
         state.error = "Could not detect document type"
 
     return state
-
 
 # Extract Data Step
 async def extract_relevant_data(
@@ -124,7 +121,7 @@ async def extract_relevant_data(
     return state
 
 
-# Validate Data Step
+# Validate Data Step 
 async def validate_document_data(
     state: DocumentProcessingState,
 ) -> DocumentProcessingState:

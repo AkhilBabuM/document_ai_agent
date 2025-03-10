@@ -33,9 +33,15 @@ def clean_llm_response(response: str) -> str:
     if match:
         response = match.group(1).strip()  # Return only the JSON content
 
-    return response.strip()  # Return the cleaned text
+    # Step 3: Extract JSON block if it exists
+    match = re.search(r"```json(.*?)```", response, re.DOTALL)
+    if match:
+        response = match.group(1).strip()  # Return only the JSON content
 
+    cleaned_response = remove_newline_characters(response.strip())  # Return the cleaned text
+    return cleaned_response
 
 def remove_newline_characters(text: str) -> str:
-    """Removes all '\n' and replaces it with ' ' blanks."""
-    return text.replace("\n", " ")
+    """Removes all '\n' and '\\n' and replaces it with ' ' blanks."""
+    cleaned_text = text.replace("\n", " ").replace("\\n", " ")
+    return cleaned_text
